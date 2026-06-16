@@ -26,10 +26,10 @@ Just download `pes6_preset_manager.exe` and run it — no installation required.
 ## Requirements
 
 - Windows
-- Python 3.8 or higher → [python.org/downloads](https://www.python.org/downloads/)
-  - During installation, check **"Add Python to PATH"**
 
-No additional packages needed — only the Python standard library is used.
+That's it. Download the `.exe` from the [releases page](https://github.com/Nicorufino/pes6-controller-preset-manager/releases/latest) and run it directly.
+
+If you prefer to run from source, you need Python 3.8+ with no additional packages.
 
 ---
 
