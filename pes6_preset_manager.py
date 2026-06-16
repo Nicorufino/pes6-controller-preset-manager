@@ -72,23 +72,21 @@ KNOWN_DEVICES: dict[str, str] = {
     "VID_1532&PID_0A00": "Razer Sabertooth",
 }
 
-# ── Lookup guid → nombre via registro de Windows ──────────────────────────────
+# ── Lookup guid → nombre y VID/PID via registro de Windows ───────────────────
 
-_device_names: dict[str, str] | None = None   # guid_hex → nombre
+_device_names:   dict[str, str] | None = None   # guid_hex → friendly name
+_guid_vid_pid:   dict[str, str] | None = None   # guid_hex → "VID_XXXX&PID_XXXX"
 
 
-def _build_name_cache() -> dict[str, str]:
-    """
-    Lee HKCU registry DirectInput device GUIDs
-    y construye un mapa {guid_hex: nombre_del_modelo}.
-    """
-    cache: dict[str, str] = {}
+def _build_name_cache() -> tuple[dict[str, str], dict[str, str]]:
+    import re
+    names:   dict[str, str] = {}
+    vid_pids: dict[str, str] = {}
     try:
         import winreg
-        BASE = (r"SYSTEM\\CurrentControlSet\\Control\\MediaProperties"
+        BASE = (r"SYSTEM\CurrentControlSet\Control\MediaProperties"
                 r"\PrivateProperties\DirectInput")
-        hive = winreg.HKEY_CURRENT_USER
-        root = winreg.OpenKey(hive, BASE)
+        root = winreg.OpenKey(winreg.HKEY_CURRENT_USER, BASE)
 
         i = 0
         while True:
@@ -97,14 +95,8 @@ def _build_name_cache() -> dict[str, str]:
             except OSError:
                 break
 
-            # Nombre legible: tabla conocida o VID/PID directo
-            # Extraer VID_XXXX&PID_XXXX limpio del nombre de la clave
-            # (puede ser "{GUID}_VID&..." para Bluetooth)
             vid_pid_clean = vid_pid.upper()
             if "VID&" in vid_pid_clean and "PID" in vid_pid_clean:
-                # Formato Bluetooth: {uuid}_VID&0002054C_PID&0CE6_...
-                # Convertir a VID_054C&PID_0CE6
-                import re
                 m = re.search(r'VID&[0-9A-F]*?([0-9A-F]{4})_PID(?:&[0-9A-F]*?([0-9A-F]{4}))?',
                               vid_pid_clean)
                 if m:
@@ -112,7 +104,6 @@ def _build_name_cache() -> dict[str, str]:
 
             friendly = KNOWN_DEVICES.get(vid_pid_clean, vid_pid_clean)
 
-            # Iterar Calibration\N\Type\GUID para obtener los guidInstance
             try:
                 cal_key = winreg.OpenKey(root, vid_pid + r"\Calibration")
                 j = 0
@@ -125,7 +116,9 @@ def _build_name_cache() -> dict[str, str]:
                         idx_key = winreg.OpenKey(cal_key, idx)
                         guid_bytes, _ = winreg.QueryValueEx(idx_key, "GUID")
                         if isinstance(guid_bytes, bytes) and len(guid_bytes) == 16:
-                            cache[guid_bytes.hex()] = friendly
+                            ghex = guid_bytes.hex()
+                            names[ghex]    = friendly
+                            vid_pids[ghex] = vid_pid_clean
                         winreg.CloseKey(idx_key)
                     except OSError:
                         pass
@@ -136,18 +129,50 @@ def _build_name_cache() -> dict[str, str]:
         winreg.CloseKey(root)
     except Exception:
         pass
-    return cache
+    return names, vid_pids
 
 
-def get_device_names() -> dict[str, str]:
-    global _device_names
+def _ensure_cache() -> None:
+    global _device_names, _guid_vid_pid
     if _device_names is None:
-        _device_names = _build_name_cache()
-    return _device_names
+        _device_names, _guid_vid_pid = _build_name_cache()
 
 
 def lookup_device_name(guid_hex: str) -> str:
-    return get_device_names().get(guid_hex, "")
+    _ensure_cache()
+    return (_device_names or {}).get(guid_hex, "")
+
+
+def _get_connected_vid_pids() -> set[str]:
+    """VID_XXXX&PID_XXXX strings for HID devices currently plugged in."""
+    import re
+    result: set[str] = set()
+    try:
+        import winreg
+        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                             r"SYSTEM\CurrentControlSet\Enum\HID")
+        i = 0
+        while True:
+            try:
+                name = winreg.EnumKey(key, i); i += 1
+                m = re.match(r'(VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4})', name.upper())
+                if m:
+                    result.add(m.group(1))
+            except OSError:
+                break
+        winreg.CloseKey(key)
+    except Exception:
+        pass
+    return result
+
+
+def is_guid_connected(guid_hex: str) -> bool:
+    """Returns True if the physical device for this GUID is currently connected."""
+    _ensure_cache()
+    vp = (_guid_vid_pid or {}).get(guid_hex)
+    if not vp:
+        return False
+    return vp in _get_connected_vid_pids()
 
 
 # ── file I/O ──────────────────────────────────────────────────────────────────
@@ -200,6 +225,7 @@ def parse_dat(path: Path) -> list[dict]:
             "device_name":  lookup_device_name(ghex),
             "mapping":      mapping,
             "is_keyboard":  is_kb,
+            "connected":    is_kb or is_guid_connected(ghex),
         })
         n += 1
     return result
@@ -416,6 +442,8 @@ class App(tk.Tk):
             return
 
         for c in self._controllers:
+            if not c["connected"]:
+                continue
             rb = tk.Radiobutton(
                 self._ctrl_container,
                 text=self._ctrl_display_name(c),
@@ -427,8 +455,10 @@ class App(tk.Tk):
             rb.pack(anchor="w", padx=6, pady=2)
             self._ctrl_radios.append(rb)
 
-        first = next((c for c in self._controllers if not c["is_keyboard"]), None)
-        self._ctrl_var.set((first or self._controllers[0])["index"])
+        connected = [c for c in self._controllers if c["connected"]]
+        first = next((c for c in connected if not c["is_keyboard"]), None)
+        if connected:
+            self._ctrl_var.set((first or connected[0])["index"])
 
     def _on_ctrl_change(self, *_):
         idx = self._ctrl_var.get()
@@ -477,9 +507,8 @@ class App(tk.Tk):
             self._controllers = parse_dat(p)
             self._rebuild_ctrl_radios()
             self._on_ctrl_change()
-            nkb = sum(1 for c in self._controllers if not c["is_keyboard"])
-            self._status_set(
-                f"Loaded — {nkb} controller(s) + keyboard ({len(self._controllers)} entries total)")
+            nkb = sum(1 for c in self._controllers if not c["is_keyboard"] and c["connected"])
+            self._status_set(f"Loaded — {nkb} controller(s) connected")
         except Exception as e:
             self._controllers = []
             self._rebuild_ctrl_radios()
