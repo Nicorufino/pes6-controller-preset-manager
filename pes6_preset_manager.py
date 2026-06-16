@@ -144,23 +144,45 @@ def lookup_device_name(guid_hex: str) -> str:
 
 
 def _get_connected_vid_pids() -> set[str]:
-    """VID_XXXX&PID_XXXX strings for HID devices currently plugged in."""
-    import re
+    """VID_XXXX&PID_XXXX strings for HID devices currently plugged in.
+    Uses SetupDiGetClassDevs with DIGCF_PRESENT — only physically connected devices."""
+    import re, ctypes
     result: set[str] = set()
     try:
-        import winreg
-        key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                             r"SYSTEM\CurrentControlSet\Enum\HID")
+        setupapi = ctypes.WinDLL("setupapi")
+
+        class GUID(ctypes.Structure):
+            _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
+                        ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+
+        HID_GUID = GUID(0x4D1E55B2, 0xF16F, 0x11CF,
+                        (ctypes.c_ubyte * 8)(0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30))
+
+        DIGCF_PRESENT = 0x02
+        DIGCF_DEVICEINTERFACE = 0x10
+        INVALID_HANDLE = ctypes.c_void_p(-1).value
+
+        hdev = setupapi.SetupDiGetClassDevsW(
+            ctypes.byref(HID_GUID), None, None, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE)
+        if hdev == INVALID_HANDLE:
+            return result
+
+        class SP_DEVINFO_DATA(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_ulong), ("ClassGuid", GUID),
+                        ("DevInst", ctypes.c_ulong), ("Reserved", ctypes.c_ulong)]
+
+        info = SP_DEVINFO_DATA()
+        info.cbSize = ctypes.sizeof(info)
+        buf = ctypes.create_unicode_buffer(512)
         i = 0
-        while True:
-            try:
-                name = winreg.EnumKey(key, i); i += 1
-                m = re.match(r'(VID_[0-9A-Fa-f]{4}&PID_[0-9A-Fa-f]{4})', name.upper())
-                if m:
-                    result.add(m.group(1))
-            except OSError:
-                break
-        winreg.CloseKey(key)
+        while setupapi.SetupDiEnumDeviceInfo(hdev, i, ctypes.byref(info)):
+            setupapi.SetupDiGetDeviceInstanceIdW(hdev, ctypes.byref(info), buf, 512, None)
+            m = re.search(r'VID_([0-9A-F]{4})&PID_([0-9A-F]{4})', buf.value.upper())
+            if m:
+                result.add(f"VID_{m.group(1)}&PID_{m.group(2)}")
+            i += 1
+
+        setupapi.SetupDiDestroyDeviceInfoList(hdev)
     except Exception:
         pass
     return result
