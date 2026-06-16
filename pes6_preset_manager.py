@@ -144,45 +144,62 @@ def lookup_device_name(guid_hex: str) -> str:
 
 
 def _get_connected_vid_pids() -> set[str]:
-    """VID_XXXX&PID_XXXX strings for HID devices currently plugged in.
-    Uses SetupDiGetClassDevs with DIGCF_PRESENT — only physically connected devices."""
-    import re, ctypes
+    """VID_XXXX&PID_XXXX strings for devices currently plugged in.
+    Scans HID, USB and BTHENUM device trees and checks live status via cfgmgr32."""
+    import re, ctypes, winreg
     result: set[str] = set()
     try:
-        setupapi = ctypes.WinDLL("setupapi")
+        cfgmgr = ctypes.WinDLL("cfgmgr32")
+        DN_STARTED = 0x00000008
 
-        class GUID(ctypes.Structure):
-            _fields_ = [("Data1", ctypes.c_ulong), ("Data2", ctypes.c_ushort),
-                        ("Data3", ctypes.c_ushort), ("Data4", ctypes.c_ubyte * 8)]
+        def _is_started(instance_id: str) -> bool:
+            dev = ctypes.c_ulong()
+            if cfgmgr.CM_Locate_DevNodeW(ctypes.byref(dev),
+                                          ctypes.create_unicode_buffer(instance_id), 0) != 0:
+                return False
+            status = ctypes.c_ulong()
+            problem = ctypes.c_ulong()
+            if cfgmgr.CM_Get_DevNode_Status(ctypes.byref(status),
+                                             ctypes.byref(problem), dev, 0) != 0:
+                return False
+            return bool(status.value & DN_STARTED)
 
-        HID_GUID = GUID(0x4D1E55B2, 0xF16F, 0x11CF,
-                        (ctypes.c_ubyte * 8)(0x88, 0xCB, 0x00, 0x11, 0x11, 0x00, 0x00, 0x30))
-
-        DIGCF_PRESENT = 0x02
-        DIGCF_DEVICEINTERFACE = 0x10
-        INVALID_HANDLE = ctypes.c_void_p(-1).value
-
-        hdev = setupapi.SetupDiGetClassDevsW(
-            ctypes.byref(HID_GUID), None, None, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE)
-        if hdev == INVALID_HANDLE:
-            return result
-
-        class SP_DEVINFO_DATA(ctypes.Structure):
-            _fields_ = [("cbSize", ctypes.c_ulong), ("ClassGuid", GUID),
-                        ("DevInst", ctypes.c_ulong), ("Reserved", ctypes.c_ulong)]
-
-        info = SP_DEVINFO_DATA()
-        info.cbSize = ctypes.sizeof(info)
-        buf = ctypes.create_unicode_buffer(512)
-        i = 0
-        while setupapi.SetupDiEnumDeviceInfo(hdev, i, ctypes.byref(info)):
-            setupapi.SetupDiGetDeviceInstanceIdW(hdev, ctypes.byref(info), buf, 512, None)
-            m = re.search(r'VID_([0-9A-F]{4})&PID_([0-9A-F]{4})', buf.value.upper())
-            if m:
-                result.add(f"VID_{m.group(1)}&PID_{m.group(2)}")
-            i += 1
-
-        setupapi.SetupDiDestroyDeviceInfoList(hdev)
+        enum_root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                    r"SYSTEM\CurrentControlSet\Enum")
+        for bus in ("HID", "USB", "BTHENUM"):
+            try:
+                bus_key = winreg.OpenKey(enum_root, bus)
+            except OSError:
+                continue
+            i = 0
+            while True:
+                try:
+                    dev_name = winreg.EnumKey(bus_key, i); i += 1
+                except OSError:
+                    break
+                m = re.search(r'VID_([0-9A-Fa-f]{4}).*?PID_([0-9A-Fa-f]{4})',
+                              dev_name.upper())
+                if not m:
+                    continue
+                vp = f"VID_{m.group(1)}&PID_{m.group(2)}"
+                if vp in result:
+                    continue
+                try:
+                    inst_key = winreg.OpenKey(bus_key, dev_name)
+                    j = 0
+                    while True:
+                        try:
+                            instance = winreg.EnumKey(inst_key, j); j += 1
+                        except OSError:
+                            break
+                        if _is_started(f"{bus}\\{dev_name}\\{instance}"):
+                            result.add(vp)
+                            break
+                    winreg.CloseKey(inst_key)
+                except OSError:
+                    pass
+            winreg.CloseKey(bus_key)
+        winreg.CloseKey(enum_root)
     except Exception:
         pass
     return result
