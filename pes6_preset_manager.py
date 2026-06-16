@@ -76,12 +76,25 @@ KNOWN_DEVICES: dict[str, str] = {
 
 _device_names:   dict[str, str] | None = None   # guid_hex → friendly name
 _guid_vid_pid:   dict[str, str] | None = None   # guid_hex → "VID_XXXX&PID_XXXX"
+_vid_pid_guids:  dict[str, list[str]] | None = None  # "VID_XXXX&PID_XXXX" → ordered guid list
 
 
-def _build_name_cache() -> tuple[dict[str, str], dict[str, str]]:
+def _normalize_vid_pid(raw: str) -> str:
     import re
-    names:   dict[str, str] = {}
+    upper = raw.upper()
+    m = re.search(r'VID_([0-9A-F]{4}).*?PID_([0-9A-F]{4})', upper)
+    if m:
+        return f"VID_{m.group(1)}&PID_{m.group(2)}"
+    m = re.search(r'VID&[0-9A-F]*?([0-9A-F]{4})_PID(?:&[0-9A-F]*?([0-9A-F]{4}))?', upper)
+    if m:
+        return f"VID_{m.group(1)}&PID_{m.group(2) or '0000'}"
+    return ""
+
+
+def _build_name_cache() -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
+    names:    dict[str, str] = {}
     vid_pids: dict[str, str] = {}
+    vp_guids: dict[str, list[str]] = {}
     try:
         import winreg
         BASE = (r"SYSTEM\CurrentControlSet\Control\MediaProperties"
@@ -95,13 +108,7 @@ def _build_name_cache() -> tuple[dict[str, str], dict[str, str]]:
             except OSError:
                 break
 
-            vid_pid_clean = vid_pid.upper()
-            if "VID&" in vid_pid_clean and "PID" in vid_pid_clean:
-                m = re.search(r'VID&[0-9A-F]*?([0-9A-F]{4})_PID(?:&[0-9A-F]*?([0-9A-F]{4}))?',
-                              vid_pid_clean)
-                if m:
-                    vid_pid_clean = f"VID_{m.group(1)}&PID_{m.group(2) or '0000'}"
-
+            vid_pid_clean = _normalize_vid_pid(vid_pid) or vid_pid.upper()
             friendly = KNOWN_DEVICES.get(vid_pid_clean, vid_pid_clean)
 
             try:
@@ -119,6 +126,7 @@ def _build_name_cache() -> tuple[dict[str, str], dict[str, str]]:
                             ghex = guid_bytes.hex()
                             names[ghex]    = friendly
                             vid_pids[ghex] = vid_pid_clean
+                            vp_guids.setdefault(vid_pid_clean, []).append(ghex)
                         winreg.CloseKey(idx_key)
                     except OSError:
                         pass
@@ -129,13 +137,13 @@ def _build_name_cache() -> tuple[dict[str, str], dict[str, str]]:
         winreg.CloseKey(root)
     except Exception:
         pass
-    return names, vid_pids
+    return names, vid_pids, vp_guids
 
 
 def _ensure_cache() -> None:
-    global _device_names, _guid_vid_pid
+    global _device_names, _guid_vid_pid, _vid_pid_guids
     if _device_names is None:
-        _device_names, _guid_vid_pid = _build_name_cache()
+        _device_names, _guid_vid_pid, _vid_pid_guids = _build_name_cache()
 
 
 def lookup_device_name(guid_hex: str) -> str:
@@ -143,11 +151,12 @@ def lookup_device_name(guid_hex: str) -> str:
     return (_device_names or {}).get(guid_hex, "")
 
 
-def _get_connected_vid_pids() -> set[str]:
-    """VID_XXXX&PID_XXXX strings for devices currently plugged in.
-    Scans HID, USB and BTHENUM device trees and checks live status via cfgmgr32."""
-    import re, ctypes, winreg
-    result: set[str] = set()
+def _get_connected_counts() -> dict[str, int]:
+    """Count started HID device instances per VID/PID.
+    Uses HID bus only — accurately reflects per-instance connection state
+    for both USB and Bluetooth controllers."""
+    import ctypes, winreg
+    counts: dict[str, int] = {}
     try:
         cfgmgr = ctypes.WinDLL("cfgmgr32")
         DN_STARTED = 0x00000008
@@ -164,59 +173,50 @@ def _get_connected_vid_pids() -> set[str]:
                 return False
             return bool(status.value & DN_STARTED)
 
-        enum_root = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                                    r"SYSTEM\CurrentControlSet\Enum")
-        for bus in ("HID", "USB", "BTHENUM"):
+        hid_key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                  r"SYSTEM\CurrentControlSet\Enum\HID")
+        i = 0
+        while True:
             try:
-                bus_key = winreg.OpenKey(enum_root, bus)
+                dev_name = winreg.EnumKey(hid_key, i); i += 1
             except OSError:
+                break
+            vp = _normalize_vid_pid(dev_name)
+            if not vp:
                 continue
-            i = 0
-            while True:
-                try:
-                    dev_name = winreg.EnumKey(bus_key, i); i += 1
-                except OSError:
-                    break
-                upper = dev_name.upper()
-                m = re.search(r'VID_([0-9A-F]{4}).*?PID_([0-9A-F]{4})', upper)
-                if m:
-                    vp = f"VID_{m.group(1)}&PID_{m.group(2)}"
-                else:
-                    # Bluetooth format: VID&0002054C_PID&0CE6
-                    m = re.search(r'VID&[0-9A-F]*?([0-9A-F]{4})_PID(?:&[0-9A-F]*?([0-9A-F]{4}))?', upper)
-                    if not m:
-                        continue
-                    vp = f"VID_{m.group(1)}&PID_{m.group(2) or '0000'}"
-                if vp in result:
-                    continue
-                try:
-                    inst_key = winreg.OpenKey(bus_key, dev_name)
-                    j = 0
-                    while True:
-                        try:
-                            instance = winreg.EnumKey(inst_key, j); j += 1
-                        except OSError:
-                            break
-                        if _is_started(f"{bus}\\{dev_name}\\{instance}"):
-                            result.add(vp)
-                            break
-                    winreg.CloseKey(inst_key)
-                except OSError:
-                    pass
-            winreg.CloseKey(bus_key)
-        winreg.CloseKey(enum_root)
+            try:
+                inst_key = winreg.OpenKey(hid_key, dev_name)
+                j = 0
+                while True:
+                    try:
+                        instance = winreg.EnumKey(inst_key, j); j += 1
+                    except OSError:
+                        break
+                    if _is_started(f"HID\\{dev_name}\\{instance}"):
+                        counts[vp] = counts.get(vp, 0) + 1
+                winreg.CloseKey(inst_key)
+            except OSError:
+                pass
+        winreg.CloseKey(hid_key)
     except Exception:
         pass
-    return result
+    return counts
 
 
 def is_guid_connected(guid_hex: str) -> bool:
-    """Returns True if the physical device for this GUID is currently connected."""
+    """True if this specific controller instance is currently connected.
+    Uses position within its VID/PID group vs. the count of connected instances."""
     _ensure_cache()
     vp = (_guid_vid_pid or {}).get(guid_hex)
     if not vp:
         return False
-    return vp in _get_connected_vid_pids()
+    counts = _get_connected_counts()
+    n = counts.get(vp, 0)
+    guids = (_vid_pid_guids or {}).get(vp, [])
+    try:
+        return guids.index(guid_hex) < n
+    except ValueError:
+        return False
 
 
 # ── file I/O ──────────────────────────────────────────────────────────────────
