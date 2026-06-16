@@ -177,11 +177,16 @@ def _get_connected_vid_pids() -> set[str]:
                     dev_name = winreg.EnumKey(bus_key, i); i += 1
                 except OSError:
                     break
-                m = re.search(r'VID_([0-9A-Fa-f]{4}).*?PID_([0-9A-Fa-f]{4})',
-                              dev_name.upper())
-                if not m:
-                    continue
-                vp = f"VID_{m.group(1)}&PID_{m.group(2)}"
+                upper = dev_name.upper()
+                m = re.search(r'VID_([0-9A-F]{4}).*?PID_([0-9A-F]{4})', upper)
+                if m:
+                    vp = f"VID_{m.group(1)}&PID_{m.group(2)}"
+                else:
+                    # Bluetooth format: VID&0002054C_PID&0CE6
+                    m = re.search(r'VID&[0-9A-F]*?([0-9A-F]{4})_PID(?:&[0-9A-F]*?([0-9A-F]{4}))?', upper)
+                    if not m:
+                        continue
+                    vp = f"VID_{m.group(1)}&PID_{m.group(2) or '0000'}"
                 if vp in result:
                     continue
                 try:
