@@ -2,7 +2,13 @@
 
 A lightweight GUI tool to save, load, and copy controller button mappings in **Pro Evolution Soccer 6** (PC). Useful when playing with multiple controllers of the same type and you want all of them to share the same layout without reconfiguring each one manually inside the game.
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
+
+## Download
+
+**[⬇ Download latest release (no Python needed)](https://github.com/Nicorufino/pes6-controller-preset-manager/releases/latest)**
+
+Just download `pes6_preset_manager.exe` and run it — no installation required.
 
 ---
 
