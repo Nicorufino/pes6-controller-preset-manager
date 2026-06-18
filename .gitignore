@@ -16,6 +16,3 @@ build/
 __pycache__/
 *.pyc
 
-# Local notes
-LEEME.txt
-settings.bak.backups/

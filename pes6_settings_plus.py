@@ -103,8 +103,8 @@ DEFAULT_PRESETS_DIR = Path.home() / "Documents" / "PES 6 Controller Presets"
 BG, BG2, BG3 = "#1e1e2e", "#313244", "#45475a"
 FG, FG2, ACC, GRN, YEL, RED = "#cdd6f4", "#a6adc8", "#89b4fa", "#a6e3a1", "#f9e2af", "#f38ba8"
 
-# ── Nombres conocidos por VID&PID ─────────────────────────────────────────────
-# Fuente: USB HID device list + conocimiento de la comunidad
+# ── Known device names by VID&PID ─────────────────────────────────────────────
+# Source: USB HID device list + community knowledge
 KNOWN_DEVICES: dict[str, str] = {
     "VID_054C&PID_0CE6": "DualSense Wireless Controller",
     "VID_054C&PID_09CC": "DualShock 4 (CUH-ZCT2)",
@@ -136,7 +136,7 @@ KNOWN_DEVICES: dict[str, str] = {
     "VID_1532&PID_0A00": "Razer Sabertooth",
 }
 
-# ── Lookup guid → nombre y VID/PID via registro de Windows ───────────────────
+# ── Lookup guid → name and VID/PID via the Windows registry ──────────────────
 
 _device_names:   dict[str, str] | None = None   # guid_hex → friendly name
 _guid_vid_pid:   dict[str, str] | None = None   # guid_hex → "VID_XXXX&PID_XXXX"
@@ -1782,7 +1782,7 @@ class App(tk.Tk):
         dev  = (ctrl.get("device_name") or "").strip().lower()
         if hint and dev:
             return hint == dev
-        # fallback: model_family (poco confiable — todos los gamepads son f111)
+        # fallback: model_family (unreliable — all gamepads are f111)
         pf = preset_obj.get("model_family", "")
         if not pf:
             return True
