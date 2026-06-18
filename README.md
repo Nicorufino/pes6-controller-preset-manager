@@ -1,62 +1,76 @@
-# PES 6 Controller Preset Manager
+# PES6 Settings+
 
-A lightweight GUI tool to save, load, and copy controller button mappings in **Pro Evolution Soccer 6** (PC). Useful when playing with multiple controllers of the same type and you want all of them to share the same layout without reconfiguring each one manually inside the game.
+An enhanced, drop-in replacement for **Pro Evolution Soccer 6**'s `settings.exe`.
+It edits `settings.dat` directly and does everything the original does — **Display**,
+**Online**, and **Device** (controller) settings — plus a lot more: per-controller
+button mapping with live capture, a `settings.dat` location picker, sharable
+controller presets with per-type defaults, and player-slot assignment. It recomputes
+the file checksum so PES 6 accepts the changes without resetting.
 
 ![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey)
 
 ## Download
 
-**[⬇ Download latest release (no Python needed)](https://github.com/Nicorufino/pes6-controller-preset-manager/releases/latest)**
+**[⬇ Download latest release (no Python needed)](https://github.com/Nicorufino/pes6-settings-plus/releases/latest)**
 
-Just download `pes6_preset_manager.exe` and run it — no installation required.
+Download `pes6_settings_plus.exe` and run it — no installation required.
 
 ---
 
 ## Features
 
-- Detects all controllers registered in `settings.dat` and shows their names (DualSense, Xbox 360, DualShock, etc.)
-- Saves a controller's current mapping as a `.pes6preset` file (JSON)
-- Applies a saved preset to any controller slot with one click
-- Warns you if you try to apply a preset to a controller of a different model
-- Automatically updates the file checksum so PES 6 accepts the changes without resetting
-- Creates a `settings.bak` backup before every write
+### Display
+- Screen mode (Window / Full Screen), resolution (from your monitor's modes),
+  quality, and brightness.
+
+### Online
+- UDP port (with auto-select) and UPnP toggle.
+
+### Device (controllers)
+- Detects every controller in `settings.dat` and names it (DualSense, Xbox 360,
+  DualShock, …), with `- 2` / `- 3` numbering to tell identical pads apart.
+- **Assign each controller to a Player slot** (1–8) or **None**; picking a taken
+  slot swaps the two. Setting a controller to **None** removes it.
+- **Edit button mappings** per controller, including **live capture** — click the
+  🎮 button and press a control to bind it.
+- **Presets**: save a controller's mapping to a sharable `.pes6preset` file, apply
+  it to any controller, or **⭐ set one as the default for that controller type**.
+- **Built-in defaults**: common pads (DualSense, Xbox 360) get working bindings
+  out of the box — first run seeds them automatically, no setup needed.
+
+### Safety
+- Recomputes the file checksum so PES 6 accepts the file without resetting.
+- Writes `settings.bak` plus rolling timestamped backups in `settings.dat.backups\`
+  before every change, so your history can't be wiped.
 
 ---
 
 ## Requirements
 
-- Windows
-
-That's it. Download the `.exe` from the [releases page](https://github.com/Nicorufino/pes6-controller-preset-manager/releases/latest) and run it directly.
-
-If you prefer to run from source, you need Python 3.8+ with no additional packages.
+- Windows. That's it — download the `.exe` from the
+  [releases page](https://github.com/Nicorufino/pes6-settings-plus/releases/latest)
+  and run it.
+- To run from source: Python 3.10+ and `pygame-ce` (only needed for the live
+  button-capture feature): `python -m pip install pygame-ce`.
 
 ---
 
 ## Usage
 
-1. Double-click **`Iniciar_PES6_Presets.bat`** to launch the app.
-2. The app auto-loads `settings.dat` from:
-   `Documents\KONAMI\Pro Evolution Soccer 6\settings.dat`
-   If your file is elsewhere, use the **…** button to locate it.
-3. Select a controller from the **Detected Controllers** list.
-4. **To save a preset:** click *Save preset for selected controller*, give it a name.
-5. **To apply a preset** (e.g. copy Player 1's layout to Player 2):
-   - Select the **destination** controller in the left panel
-   - Select the **preset** in the right panel
-   - Click **Apply selected preset to indicated controller**
+1. Launch the app.
+2. It auto-loads `settings.dat`. If yours is elsewhere, use the **…** button next
+   to the path to locate it.
+3. Use the **Display**, **Online**, and **Device** tabs and click the **Save** /
+   **Apply** button on each tab.
 
----
+### Assigning controllers to players
+On the **Device** tab, set each controller's dropdown to a Player slot (or None),
+then click **Apply assignments**. A newly assigned pad of a known type gets its
+default mapping automatically.
 
-## Important: apply presets to the same controller model
-
-Each controller type (DualSense, Xbox 360, DualShock 4, etc.) uses a different button numbering scheme. **Applying a preset from one model to a different model will cause PES 6 to reset the entire controller configuration** (including resolution and all other slots).
-
-The app detects mismatches and warns you before applying, but the rule of thumb is:
-
-> **DualSense preset → DualSense slot only. Xbox 360 preset → Xbox 360 slot only.**
-
-Presets saved from one physical controller of a given model are fully compatible with any other controller of the same model.
+> Note: in PES 6, the keyboard is a separate device and the actual in-match
+> Local/Visitante assignment is also chosen in-game. The app controls which
+> controllers exist as players and their mappings.
 
 ---
 
@@ -64,23 +78,30 @@ Presets saved from one physical controller of a given model are fully compatible
 
 | File | Description |
 |---|---|
-| `pes6_preset_manager.py` | Main application |
-| `Iniciar_PES6_Presets.bat` | Launcher (double-click to run) |
+| `pes6_settings_plus.py` | Main application |
 | `*.pes6preset` | Preset files (JSON) — safe to share |
-| `settings.bak` | Auto-backup created before each write |
+| `settings.bak` / `settings.dat.backups\` | Automatic backups |
 
 ---
 
 ## How it works
 
-`settings.dat` is a 420-byte binary file. Each controller occupies a 44-byte block containing:
-- A 16-byte GUID identifying the physical device
-- 24 bytes of button/axis mapping
+`settings.dat` is a fixed 420-byte binary file:
 
-The tool reads and writes only those 24 mapping bytes and recalculates the file's 16-bit checksum (sum of all bytes from offset 4, stored at bytes 2–3) so PES 6 validates the file correctly.
+```
+Header(16) + N × [44-byte device block] + filler + upnp(4) + port(4)
+```
+
+Each device block is `guid(16) + button mapping(24) + active flag(4)`; the file
+holds up to 9 blocks (keyboard + 8 controllers). Display settings live in the
+header; the app reads/writes the relevant fields and recalculates the 16-bit
+checksum (sum of bytes from offset 4, stored at bytes 2–3) so PES 6 validates the
+file.
 
 ---
 
 ## Backup & recovery
 
-Before every write, the app saves a backup to `settings.bak` in the same folder as `settings.dat`. To restore it, simply rename `settings.bak` to `settings.dat`.
+Before every write, the app saves `settings.bak` next to `settings.dat`, plus a
+timestamped copy under `settings.dat.backups\` (last 20 kept). To restore, copy a
+backup back over `settings.dat`.

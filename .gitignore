@@ -1,0 +1,21 @@
+# PES 6 runtime/config files (user-specific — never commit)
+settings.dat
+settings.bak
+settings.dat.backups/
+settings.dat.bak
+*.dat
+save/
+
+# Build output
+dist/
+build/
+*.exe
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+
+# Local notes
+LEEME.txt
+settings.bak.backups/
