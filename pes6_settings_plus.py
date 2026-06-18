@@ -14,16 +14,19 @@ import json, os, shutil, struct
 from pathlib import Path
 from datetime import datetime
 
+# The 24 PES button "functions", in the exact order they're stored in each
+# 24-byte mapping block (left-hand block first, then right-hand block). Labels
+# match what settings.exe shows; sticks show the direction to push.
 PES_INPUTS = [
     "L2", "L1",
     "D-Pad ←", "D-Pad →",
     "D-Pad ↑", "D-Pad ↓",
-    "Axis Y −", "Axis X −", "Axis Y +", "Axis X +",
-    "L3", "Button 8",
+    "L-Stick ↑", "L-Stick ←", "L-Stick ↓", "L-Stick →",
+    "L3", "Select",
     "R2", "R1",
     "△", "□", "✕", "○",
-    "Rotation Z −", "Axis Z −", "Rotation Z +", "Axis Z +",
-    "R3", "Button 9",
+    "R-Stick ↑", "R-Stick ←", "R-Stick ↓", "R-Stick →",
+    "R3", "Start",
 ]
 
 # Built-in default button mappings per controller type (VID/PID). Applied
@@ -47,6 +50,26 @@ BUILTIN_EXTRA_PRESETS: list[dict] = [
                     15, 14, 13, 12, 8, 10, 11, 9, 0, 1, 2, 3],
     },
 ]
+
+# ── App config (remembers last-used paths) ────────────────────────────────────
+CONFIG_PATH = Path.home() / ".pes6_settings_plus.json"
+
+
+def load_config() -> dict:
+    try:
+        return json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_config(**fields) -> None:
+    cfg = load_config()
+    cfg.update(fields)
+    try:
+        CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 
 # ── File layout (FIXED 420 bytes) ─────────────────────────────────────────────
 # settings.dat =
@@ -902,6 +925,55 @@ def describe_input(inp) -> str:
     return str(inp)
 
 
+# Map a captured pygame/SDL input to the PES action index it represents (indices
+# match PES_INPUTS). Based on SDL's standard game-controller layout, which the
+# joystick API exposes for recognised pads (DualSense, Xbox, …).
+#   buttons: index
+#   axes:    ("axis", index, sign)
+#   hats:    ("hat", value)
+SDL_BUTTON_TO_ACTION = {
+    0: 16, 1: 17, 2: 15, 3: 14,     # ✕ ○ □ △
+    4: 11, 6: 23,                   # Select, Start  (5 = Guide/PS, ignored)
+    7: 10, 8: 22,                   # L3, R3
+    9: 1, 10: 13,                   # L1, R1
+    11: 4, 12: 5, 13: 2, 14: 3,     # D-Pad ↑ ↓ ← →
+}
+SDL_AXIS_TO_ACTION = {
+    (0, -1): 7, (0, 1): 9,          # L-Stick ← →
+    (1, -1): 6, (1, 1): 8,          # L-Stick ↑ ↓
+    (2, -1): 19, (2, 1): 21,        # R-Stick ← →
+    (3, -1): 18, (3, 1): 20,        # R-Stick ↑ ↓
+    (4, 1): 0, (5, 1): 12,          # L2, R2 triggers
+}
+SDL_HAT_TO_ACTION = {
+    (0, 1): 4, (0, -1): 5, (-1, 0): 2, (1, 0): 3,   # D-Pad ↑ ↓ ← →
+}
+
+
+def input_to_action(inp) -> int | None:
+    """The PES action index a captured input maps to, or None."""
+    if not inp:
+        return None
+    if inp[0] == "button":
+        return SDL_BUTTON_TO_ACTION.get(inp[1])
+    if inp[0] == "axis":
+        return SDL_AXIS_TO_ACTION.get((inp[1], inp[2]))
+    if inp[0] == "hat":
+        return SDL_HAT_TO_ACTION.get(inp[2])
+    return None
+
+
+def input_to_pes_id(inp, mapping: list[int]) -> int | None:
+    """Convert a captured physical input to the PES object id to store, using the
+    controller's own mapping: the input identifies a PES action (via SDL layout),
+    and that action's current id is exactly the object id of the pressed control."""
+    a = input_to_action(inp)
+    if a is None or a >= len(mapping):
+        return None
+    val = mapping[a]
+    return val if val != UNASSIGNED else None
+
+
 # ── GUI ───────────────────────────────────────────────────────────────────────
 
 class App(tk.Tk):
@@ -909,11 +981,12 @@ class App(tk.Tk):
         super().__init__()
         self.title("PES6 Settings+  —  enhanced settings.exe for Pro Evolution Soccer 6")
         self.configure(bg=BG)
-        self.minsize(860, 500)
-        self.geometry("1100x700")
+        self.minsize(1040, 640)
+        self.geometry("1180x780")
 
-        self._dat_path    = tk.StringVar(value=str(DEFAULT_DAT))
-        self._presets_dir = tk.StringVar(value=str(DEFAULT_PRESETS_DIR))
+        cfg = load_config()
+        self._dat_path    = tk.StringVar(value=cfg.get("dat_path", str(DEFAULT_DAT)))
+        self._presets_dir = tk.StringVar(value=cfg.get("presets_dir", str(DEFAULT_PRESETS_DIR)))
         self._status      = tk.StringVar(value="Ready.")
         self._controllers: list[dict] = []
         self._preset_files: list[Path] = []
@@ -1047,124 +1120,216 @@ class App(tk.Tk):
 
     # ── Device tab ──────────────────────────────────────────────────────────────
 
-    def _build_device_tab(self, device_tab):
-        pf = self._frame(device_tab, "Presets folder")
-        pf.pack(fill="x", padx=8, pady=(8,0))
-        pf.columnconfigure(1, weight=1)
-        tk.Label(pf, text="Folder:", bg=BG, fg=FG,
-                 font=("Segoe UI", 9)).grid(row=0, column=0, padx=(8,4), pady=5, sticky="w")
-        tk.Entry(pf, textvariable=self._presets_dir, bg=BG2, fg=FG,
-                 insertbackground=FG, relief="flat", font=("Segoe UI", 9)
-                 ).grid(row=0, column=1, padx=4, pady=5, sticky="ew")
-        self._btn(pf, "…", self._browse_presets_dir, w=3).grid(row=0, column=2, padx=(2,8))
+    def _make_action_row(self, parent, idx: int, row: int, mirror: bool):
+        """One mapping row: label + ID entry + 🎮 bind. `mirror` puts the label on
+        the right (for the column to the right of the controller diagram)."""
+        var = tk.StringVar(value="—")
+        ent = tk.Entry(parent, textvariable=var, bg=BG2, fg=GRN, width=4,
+                       justify="center", relief="flat", insertbackground=FG,
+                       font=("Segoe UI", 9))
+        bb = tk.Button(parent, text="🎮", command=lambda i=idx: self._bind_action(i),
+                       relief="flat", cursor="hand2", bg=BG3, fg=FG,
+                       activebackground=ACC, font=("Segoe UI", 8), padx=3, pady=0)
+        lbl = tk.Label(parent, text=PES_INPUTS[idx], bg=BG, fg=FG,
+                       font=("Segoe UI", 9), width=11,
+                       anchor="e" if mirror else "w")
+        if mirror:
+            bb.grid(row=row, column=0, padx=(8, 2), pady=2)
+            ent.grid(row=row, column=1, padx=2, pady=2)
+            lbl.grid(row=row, column=2, padx=(4, 8), pady=2, sticky="e")
+        else:
+            lbl.grid(row=row, column=0, padx=(8, 4), pady=2, sticky="w")
+            ent.grid(row=row, column=1, padx=2, pady=2)
+            bb.grid(row=row, column=2, padx=(2, 8), pady=2)
+        self._mapping_vars.append(var)
+        self._mapping_entries.append(ent)
 
+    def _build_device_tab(self, device_tab):
         main = tk.Frame(device_tab, bg=BG)
         main.pack(fill="both", expand=True, padx=8, pady=8)
-        main.columnconfigure(0, weight=0)
-        main.columnconfigure(1, weight=1)
+        main.columnconfigure(0, weight=0, minsize=300)   # assign + presets
+        main.columnconfigure(1, weight=0)                # left action column
+        main.columnconfigure(2, weight=1)                # controller diagram
+        main.columnconfigure(3, weight=0)                # right action column
         main.rowconfigure(0, weight=1)
 
-        left = tk.Frame(main, bg=BG)
-        left.grid(row=0, column=0, sticky="nsew", padx=(0,6))
-        left.rowconfigure(1, weight=1)
+        # ── far-left: controllers assignment + presets ──────────────────────────
+        far = tk.Frame(main, bg=BG)
+        far.grid(row=0, column=0, sticky="nsew", padx=(0, 8))
+        far.rowconfigure(1, weight=1)
 
-        cf = self._frame(left, "Controllers  →  assign to a Player slot")
-        cf.grid(row=0, column=0, sticky="ew", pady=(0,6))
+        cf = self._frame(far, "Controllers  →  Player slot")
+        cf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
         self._ctrl_container = tk.Frame(cf, bg=BG)
         self._ctrl_container.pack(fill="x")
         self._no_ctrl_lbl = tk.Label(self._ctrl_container, text="(no data)",
                                      bg=BG, fg=FG2, font=("Segoe UI", 9, "italic"))
         self._no_ctrl_lbl.pack(padx=12, pady=6)
         self._btn(cf, "✔  Apply assignments", self._apply_assignments, accent=True
-                  ).pack(fill="x", padx=8, pady=(2,6))
+                  ).pack(fill="x", padx=8, pady=(2, 6))
 
-        mf = self._frame(left, "Selected Controller Mapping")
-        mf.grid(row=1, column=0, sticky="nsew")
-        mf.rowconfigure(0, weight=1)
-        mf.columnconfigure(0, weight=1)
+        pr = self._frame(far, "Presets")
+        pr.grid(row=1, column=0, sticky="nsew")
+        pr.rowconfigure(0, weight=1)
+        pr.columnconfigure(0, weight=1)
+        pr.columnconfigure(1, weight=1)
+        self._preset_list = tk.Listbox(
+            pr, bg=BG2, fg=FG, selectbackground=ACC, selectforeground="#1e1e2e",
+            font=("Segoe UI", 9), relief="flat", activestyle="none",
+            borderwidth=0, highlightthickness=0, height=6)
+        self._preset_list.grid(row=0, column=0, columnspan=2, padx=8, pady=(8, 4), sticky="nsew")
+        self._preset_list.bind("<<ListboxSelect>>", self._on_preset_select)
+        self._detail_lbl = tk.Label(pr, text="", bg=BG, fg=FG2,
+                                    font=("Segoe UI", 8), anchor="w", justify="left",
+                                    wraplength=270)
+        self._detail_lbl.grid(row=1, column=0, columnspan=2, padx=8, pady=(0, 4), sticky="w")
+        self._btn(pr, "✅  Apply preset to controller", self._apply_preset, accent=True
+                  ).grid(row=2, column=0, columnspan=2, padx=8, pady=(2, 3), sticky="ew")
+        self._btn(pr, "⭐  Set as type default", self._set_preset_default
+                  ).grid(row=3, column=0, columnspan=2, padx=8, pady=2, sticky="ew")
+        self._btn(pr, "💾  Save", self._save_preset
+                  ).grid(row=4, column=0, padx=(8, 3), pady=2, sticky="ew")
+        self._btn(pr, "📥  Import", self._import_preset
+                  ).grid(row=4, column=1, padx=(3, 8), pady=2, sticky="ew")
+        self._btn(pr, "🗑  Delete", self._delete_preset
+                  ).grid(row=5, column=0, padx=(8, 3), pady=(2, 8), sticky="ew")
+        self._btn(pr, "📂  Folder", self._open_presets_folder
+                  ).grid(row=5, column=1, padx=(3, 8), pady=(2, 8), sticky="ew")
 
-        canvas = tk.Canvas(mf, bg=BG, highlightthickness=0, width=260)
-        vsb = tk.Scrollbar(mf, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=vsb.set)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        inner = tk.Frame(canvas, bg=BG)
-        cw = canvas.create_window((0,0), window=inner, anchor="nw")
-        inner.bind("<Configure>", lambda e: (
-            canvas.configure(scrollregion=canvas.bbox("all")),
-            canvas.itemconfig(cw, width=canvas.winfo_width())))
-        canvas.bind("<Configure>", lambda e: canvas.itemconfig(cw, width=e.width))
-        canvas.bind_all("<MouseWheel>",
-            lambda e: canvas.yview_scroll(int(-1*(e.delta/120)), "units"))
-
-        tk.Label(inner, text="PES 6 Action", bg=BG, fg=ACC,
-                 font=("Segoe UI", 9, "bold"), anchor="w", width=20
-                 ).grid(row=0, column=0, padx=(8,4), pady=(4,2), sticky="w")
-        tk.Label(inner, text="ID", bg=BG, fg=ACC,
-                 font=("Segoe UI", 9, "bold"), width=5
-                 ).grid(row=0, column=1, padx=2, pady=(4,2))
-        tk.Label(inner, text="Bind", bg=BG, fg=ACC,
-                 font=("Segoe UI", 9, "bold"), width=4
-                 ).grid(row=0, column=2, padx=(2,8), pady=(4,2))
-
+        # ── mapping: left column | controller diagram | right column ────────────
         self._mapping_vars: list[tk.StringVar] = []
         self._mapping_entries: list[tk.Entry] = []
-        for i, name in enumerate(PES_INPUTS):
-            tk.Label(inner, text=name, bg=BG, fg=FG,
-                     font=("Segoe UI", 9), anchor="w", width=20
-                     ).grid(row=i+1, column=0, padx=(8,4), pady=1, sticky="w")
-            var = tk.StringVar(value="—")
-            ent = tk.Entry(inner, textvariable=var, bg=BG2, fg=GRN, width=5,
-                           justify="center", relief="flat", insertbackground=FG,
-                           font=("Segoe UI", 9))
-            ent.grid(row=i+1, column=1, padx=2, pady=1)
-            bb = tk.Button(inner, text="🎮", command=lambda idx=i: self._bind_action(idx),
-                           relief="flat", cursor="hand2", bg=BG3, fg=FG,
-                           activebackground=ACC, font=("Segoe UI", 8), padx=2, pady=0)
-            bb.grid(row=i+1, column=2, padx=(2,8), pady=1)
-            self._mapping_vars.append(var)
-            self._mapping_entries.append(ent)
 
-        self._btn(mf, "💾  Save mapping to selected controller",
-                  self._save_mapping).grid(row=1, column=0, columnspan=2,
-                                           padx=8, pady=(2,6), sticky="ew")
+        leftcol = tk.Frame(main, bg=BG)
+        leftcol.grid(row=0, column=1, sticky="n", pady=(4, 0))
+        for i in range(12):                      # left-hand block (L2…Select)
+            self._make_action_row(leftcol, i, i, mirror=False)
 
-        right = self._frame(main, "Saved Presets")
-        right.grid(row=0, column=1, sticky="nsew")
-        right.rowconfigure(0, weight=1)
-        right.columnconfigure(0, weight=1)
-        right.columnconfigure(1, weight=1)
+        self._diagram = tk.Canvas(main, bg=BG, highlightthickness=0, width=300, height=360)
+        self._diagram.grid(row=0, column=2, sticky="n", pady=(4, 0))
+        # Show a controller image if the user dropped one next to the app;
+        # otherwise fall back to the drawn vector.
+        self._ctrl_img = self._load_controller_image(target=300)
+        if self._ctrl_img is not None:
+            self._diagram.configure(width=self._ctrl_img.width(),
+                                    height=self._ctrl_img.height())
+            self._diagram.create_image(self._ctrl_img.width() // 2,
+                                       self._ctrl_img.height() // 2,
+                                       image=self._ctrl_img)
+        else:
+            self._draw_controller(self._diagram)
 
-        self._preset_list = tk.Listbox(
-            right, bg=BG2, fg=FG, selectbackground=ACC,
-            selectforeground="#1e1e2e", font=("Segoe UI", 9),
-            relief="flat", activestyle="none", borderwidth=0, highlightthickness=0)
-        self._preset_list.grid(row=0, column=0, columnspan=2,
-                               padx=8, pady=(8,4), sticky="nsew")
-        self._preset_list.bind("<<ListboxSelect>>", self._on_preset_select)
+        rightcol = tk.Frame(main, bg=BG)
+        rightcol.grid(row=0, column=3, sticky="n", pady=(4, 0))
+        for i in range(12, 24):                  # right-hand block (R2…Start)
+            self._make_action_row(rightcol, i, i - 12, mirror=True)
 
-        self._detail_lbl = tk.Label(right, text="", bg=BG, fg=FG2,
-                                    font=("Segoe UI", 8), anchor="w")
-        self._detail_lbl.grid(row=1, column=0, columnspan=2, padx=8, pady=(0,4), sticky="w")
+        # ── bottom bar: settings.dat presets-folder + save mapping ──────────────
+        bottom = tk.Frame(device_tab, bg=BG)
+        bottom.pack(fill="x", padx=8, pady=(0, 8))
+        bottom.columnconfigure(1, weight=1)
+        tk.Label(bottom, text="Presets folder:", bg=BG, fg=FG2,
+                 font=("Segoe UI", 8)).grid(row=0, column=0, padx=(2, 4), sticky="w")
+        tk.Entry(bottom, textvariable=self._presets_dir, bg=BG2, fg=FG,
+                 insertbackground=FG, relief="flat", font=("Segoe UI", 8)
+                 ).grid(row=0, column=1, padx=4, sticky="ew")
+        self._btn(bottom, "…", self._browse_presets_dir, w=3).grid(row=0, column=2, padx=2)
+        self._btn(bottom, "💾  Save mapping to selected controller",
+                  self._save_mapping, accent=True
+                  ).grid(row=1, column=0, columnspan=3, padx=2, pady=(6, 0), sticky="ew")
 
-        self._btn(right, "✅  Apply selected preset to selected controller",
-                  self._apply_preset, accent=True).grid(
-                      row=2, column=0, columnspan=2, padx=8, pady=(4,3), sticky="ew")
-        self._btn(right, "⭐  Set as default for this controller type",
-                  self._set_preset_default).grid(
-                      row=3, column=0, columnspan=2, padx=8, pady=3, sticky="ew")
-        self._btn(right, "💾  Save preset for selected controller",
-                  self._save_preset).grid(row=4, column=0, columnspan=2,
-                                          padx=8, pady=3, sticky="ew")
-        self._btn(right, "📥  Import preset from file",
-                  self._import_preset).grid(row=5, column=0, columnspan=2,
-                                            padx=8, pady=3, sticky="ew")
-        self._btn(right, "🗑  Delete",
-                  self._delete_preset).grid(row=6, column=0,
-                                            padx=(8,3), pady=(3,8), sticky="ew")
-        self._btn(right, "📂  Open folder",
-                  self._open_presets_folder).grid(row=6, column=1,
-                                                  padx=(3,8), pady=(3,8), sticky="ew")
+    def _controller_image_path(self) -> Path | None:
+        """Find a user-supplied controller image next to the app (or in the
+        presets folder / current dir). Drop e.g. 'controller.png' to use it."""
+        import sys
+        names = ["controller.png", "controller.gif", "controller.jpg",
+                 "controller.jpeg", "dualsense.png", "ds5.png"]
+        # Search user-overridable locations first, then the bundled copy
+        # (PyInstaller extracts --add-data files into sys._MEIPASS).
+        dirs = [Path(sys.argv[0]).resolve().parent,        # next to the exe
+                Path(self._presets_dir.get()), Path.cwd(),
+                Path(__file__).resolve().parent]           # next to the .py
+        bundled = getattr(sys, "_MEIPASS", "")
+        if bundled:
+            dirs.append(Path(bundled))                     # bundled default (last)
+        for d in dirs:
+            for n in names:
+                p = d / n
+                if p.is_file():
+                    return p
+        return None
+
+    def _load_controller_image(self, target: int = 300):
+        """Load and scale the controller image to ~`target` px wide. Uses Pillow
+        if available (any format, smooth), else tk PhotoImage (PNG/GIF only)."""
+        p = self._controller_image_path()
+        if not p:
+            return None
+        try:
+            from PIL import Image, ImageTk          # best quality / any format
+            im = Image.open(p).convert("RGBA")
+            w, h = im.size
+            scale = target / w
+            im = im.resize((int(w * scale), int(h * scale)), Image.LANCZOS)
+            return ImageTk.PhotoImage(im)
+        except Exception:
+            pass
+        try:
+            img = tk.PhotoImage(file=str(p))         # PNG/GIF, integer downscale
+            f = max(1, round(img.width() / target))
+            return img.subsample(f, f) if f > 1 else img
+        except Exception:
+            return None
+
+    def _draw_controller(self, c: tk.Canvas):
+        """Flat DualSense-style illustration (original vector, decorative)."""
+        WHITE, DARK, BTN, STICK = "#dde1ee", "#22222b", "#aeb4c8", "#15151b"
+
+        def rr(x0, y0, x1, y1, r, **kw):
+            pts = [x0+r, y0, x1-r, y0, x1, y0, x1, y0+r, x1, y1-r, x1, y1,
+                   x1-r, y1, x0+r, y1, x0, y1, x0, y1-r, x0, y0+r, x0, y0]
+            return c.create_polygon(pts, smooth=True, **kw)
+
+        # shoulder bumpers
+        rr(80, 50, 120, 74, 10, fill=WHITE, outline="")
+        rr(180, 50, 220, 74, 10, fill=WHITE, outline="")
+        c.create_text(100, 44, text="L1 / L2", fill=FG2, font=("Segoe UI", 7))
+        c.create_text(200, 44, text="R1 / R2", fill=FG2, font=("Segoe UI", 7))
+
+        # grips + white top shell
+        rr(40, 150, 112, 300, 34, fill=WHITE, outline="")
+        rr(188, 150, 260, 300, 34, fill=WHITE, outline="")
+        rr(66, 64, 234, 196, 46, fill=WHITE, outline="")
+        # blue accent seam + dark lower shell
+        rr(72, 150, 228, 166, 8, fill=ACC, outline="")
+        rr(80, 150, 220, 226, 32, fill=DARK, outline="")
+        # touchpad
+        rr(122, 72, 178, 118, 12, fill="#cfd3e2", outline="")
+
+        # D-pad
+        dx, dy = 96, 126
+        for ax, ay in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            bx, by = dx + ax*16, dy + ay*16
+            rr(bx-9, by-9, bx+9, by+9, 4, fill=BTN, outline="")
+
+        # face buttons △ ○ ✕ □
+        fx, fy, rad = 204, 126, 11
+        for sym, (ax, ay), col in (("△", (0, -1), GRN), ("○", (1, 0), RED),
+                                   ("✕", (0, 1), YEL), ("□", (-1, 0), ACC)):
+            bx, by = fx + ax*22, fy + ay*22
+            c.create_oval(bx-rad, by-rad, bx+rad, by+rad, fill="#2a2a34",
+                          outline=col, width=2)
+            c.create_text(bx, by, text=sym, fill=col, font=("Segoe UI", 10, "bold"))
+
+        # select / start
+        rr(134, 126, 146, 133, 3, fill=BTN, outline="")
+        rr(154, 126, 166, 133, 3, fill=BTN, outline="")
+
+        # analog sticks
+        for sx, lab in ((118, "L3"), (182, "R3")):
+            c.create_oval(sx-24, 176, sx+24, 224, fill="#3a3a46", outline=BTN, width=2)
+            c.create_oval(sx-15, 185, sx+15, 215, fill=STICK, outline="")
+            c.create_text(sx, 233, text=lab, fill=FG2, font=("Segoe UI", 7))
 
     # ── Online tab ──────────────────────────────────────────────────────────────
 
@@ -1516,13 +1681,19 @@ class App(tk.Tk):
         if not joys:
             messagebox.showwarning("Bind", err)
             return
+        # Reference action→id map for this controller type (verified default if we
+        # have one, else the controller's current mapping). Lets us translate the
+        # pressed physical control into the correct PES object id.
+        ref_map = (type_default_mapping(Path(self._presets_dir.get()),
+                                        lookup_vid_pid(ctrl["guid_hex"]))
+                   or ctrl["mapping"])
 
         dlg = tk.Toplevel(self)
         dlg.title(f"Bind  {PES_INPUTS[action_idx]}")
         dlg.configure(bg=BG)
         dlg.transient(self)
         dlg.grab_set()
-        dlg.geometry("360x180")
+        dlg.geometry("380x180")
 
         tk.Label(dlg, text=f"Press the control for:\n{PES_INPUTS[action_idx]}",
                  bg=BG, fg=ACC, font=("Segoe UI", 11, "bold"),
@@ -1530,7 +1701,7 @@ class App(tk.Tk):
         raw_var = tk.StringVar(value="Waiting for input…")
         tk.Label(dlg, textvariable=raw_var, bg=BG, fg=FG,
                  font=("Segoe UI", 10)).pack(pady=2)
-        tk.Label(dlg, text="(buttons auto-fill the ID; verify axes/hats in-game)",
+        tk.Label(dlg, text="(works for buttons, triggers and sticks)",
                  bg=BG, fg=FG2, font=("Segoe UI", 8, "italic")).pack(pady=2)
 
         state = {"done": False}
@@ -1546,7 +1717,6 @@ class App(tk.Tk):
             except tk.TclError:
                 pass
 
-        # flush any queued events first
         if _pygame:
             _pygame.event.clear()
 
@@ -1556,21 +1726,12 @@ class App(tk.Tk):
             inp = poll_input_event(joys)
             if inp:
                 raw_var.set(describe_input(inp))
-                if inp[0] == "button":
-                    finish(inp[1], describe_input(inp))
+                pid = input_to_pes_id(inp, ref_map)
+                if pid is not None:
+                    finish(pid, describe_input(inp))
                     return
-                # Axis/hat (e.g. L2/R2 triggers): PES's axis/POV ID can't be
-                # derived from pygame, so close instead of looping and ask the
-                # user to type the ID. (Defaults already cover the triggers.)
-                state["done"] = True
-                self._status_set(
-                    f"{PES_INPUTS[action_idx]}: detected {describe_input(inp)} — "
-                    f"enter its ID manually (analog axes can't be auto-bound).")
-                try:
-                    dlg.grab_release(); dlg.destroy()
-                except tk.TclError:
-                    pass
-                return
+                # Unrecognised control: show it but keep listening (let the user
+                # press a mapped one or Cancel and type the ID).
             dlg.after(40, tick)
 
         tk.Button(dlg, text="Cancel", command=lambda: finish(None),
@@ -1607,12 +1768,15 @@ class App(tk.Tk):
             filetypes=[("DAT", "*.dat"), ("All files", "*.*")])
         if p:
             self._dat_path.set(p)
+            save_config(dat_path=p)          # remember for next launch
             self._reload_all()
 
     def _browse_presets_dir(self):
         d = filedialog.askdirectory(title="Presets folder")
         if d:
             self._presets_dir.set(d)
+            save_config(presets_dir=d)
+            seed_builtin_presets(Path(d))
             self._refresh_preset_list()
 
     def _load_from_dat(self):
@@ -1629,6 +1793,7 @@ class App(tk.Tk):
             self._on_ctrl_change()
             nkb = sum(1 for c in self._controllers if not c["is_keyboard"] and c["connected"])
             self._status_set(f"Loaded — {nkb} controller(s) connected")
+            save_config(dat_path=str(p))     # remember this file for next launch
         except Exception as e:
             self._controllers = []
             self._rebuild_ctrl_radios()

@@ -19,4 +19,11 @@ if %errorlevel% neq 0 (
     python -m pip install pygame-ce --quiet
 )
 
+:: Install Pillow if missing (used to show the controller image, if provided)
+python -c "import PIL" >nul 2>&1
+if %errorlevel% neq 0 (
+    echo Installing dependency Pillow...
+    python -m pip install Pillow --quiet
+)
+
 python "%~dp0pes6_settings_plus.py"

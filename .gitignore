@@ -16,3 +16,10 @@ build/
 __pycache__/
 *.pyc
 
+# Controller image is user-supplied (may be copyrighted); the app falls back to
+# a drawn controller when it's absent. Bundle it into the exe locally instead.
+controller.png
+controller.jpg
+controller.jpeg
+controller.gif
+
