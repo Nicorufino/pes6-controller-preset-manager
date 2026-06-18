@@ -983,6 +983,7 @@ class App(tk.Tk):
         self.configure(bg=BG)
         self.minsize(1040, 640)
         self.geometry("1180x780")
+        self._set_window_icon()
 
         cfg = load_config()
         self._dat_path    = tk.StringVar(value=cfg.get("dat_path", str(DEFAULT_DAT)))
@@ -1237,6 +1238,31 @@ class App(tk.Tk):
         self._btn(bottom, "💾  Save mapping to selected controller",
                   self._save_mapping, accent=True
                   ).grid(row=1, column=0, columnspan=3, padx=2, pady=(6, 0), sticky="ew")
+
+    def _set_window_icon(self):
+        """Use icon.ico / p6s+.png for the window + taskbar icon, if present."""
+        import sys
+        dirs = [Path(sys.argv[0]).resolve().parent, Path(__file__).resolve().parent,
+                Path.cwd()]
+        bundled = getattr(sys, "_MEIPASS", "")
+        if bundled:
+            dirs.append(Path(bundled))
+        for d in dirs:
+            ico = d / "icon.ico"
+            if ico.is_file():
+                try:
+                    self.iconbitmap(default=str(ico)); return
+                except Exception:
+                    pass
+        for d in dirs:
+            for n in ("p6s+.png", "icon.png"):
+                p = d / n
+                if p.is_file():
+                    try:
+                        self._win_icon = tk.PhotoImage(file=str(p))
+                        self.iconphoto(True, self._win_icon); return
+                    except Exception:
+                        pass
 
     def _controller_image_path(self) -> Path | None:
         """Find a user-supplied controller image next to the app (or in the

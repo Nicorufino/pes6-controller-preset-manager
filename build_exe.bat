@@ -10,7 +10,9 @@ python -m pip install --quiet pyinstaller pygame-ce Pillow
 
 python -m PyInstaller --noconfirm --onefile --windowed ^
     --name pes6_settings_plus ^
+    --icon "icon.ico" ^
     --add-data "controller.png;." ^
+    --add-data "icon.ico;." ^
     pes6_settings_plus.py
 
 echo.
